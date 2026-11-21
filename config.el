@@ -331,17 +331,42 @@ If it's already that big, balance all windows instead."
    '("C-k" . +my/scroll-half-page-down)))
 (map! :leader :desc "Jump to references" "c r" #'+lookup/references)
 
-;; `o' in normal state opens a file in the window to the right, like `o' in
-;; dired. Meow's block selection moves from `o' to `O' (replacing `meow-to-block').
+;; `o' in normal state opens what's at point (an org link) or else a file by
+;; name, in the window to the right, like `o' in dired. Meow's block selection
+;; moves from `o' to `O' (replacing `meow-to-block').
 (defun +my/find-file-right (file)
   "Open FILE in the window to the right."
   (interactive (list (read-file-name "Find file (right): ")))
   (+my/select-window-right)
   (find-file file))
 
+(defun +my/org-open-link-right ()
+  "Open the org link at point in the window to the right.
+Web and mail links just open normally."
+  (let ((type (org-element-property :type (org-element-context)))
+        (buf (current-buffer))
+        (pos (point)))
+    (if (member type '("http" "https" "mailto"))
+        (org-open-at-point)
+      ;; Show this buffer on the right and follow the link from there, so file
+      ;; links and links to headings both land in the right window.
+      (+my/select-window-right)
+      (switch-to-buffer buf)
+      (goto-char pos)
+      (let ((org-link-frame-setup (cons '(file . find-file) org-link-frame-setup)))
+        (org-open-at-point)))))
+
+(defun +my/open-right ()
+  "Open what's at point on the right: an org link, or else a file by name."
+  (interactive)
+  (if (and (derived-mode-p 'org-mode)
+           (eq (org-element-type (org-element-context)) 'link))
+      (+my/org-open-link-right)
+    (call-interactively #'+my/find-file-right)))
+
 (after! meow
   (meow-normal-define-key
-   '("o" . +my/find-file-right)
+   '("o" . +my/open-right)
    '("O" . meow-block)))
 
 ;; In Magit, RET on a changed file or hunk opens it in the window to the right
