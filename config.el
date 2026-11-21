@@ -382,3 +382,8 @@ If it's already that big, balance all windows instead."
 (map! :leader
       :desc "Confirm (C-c C-c)" "a" #'+my/confirm
       :desc "Cancel (C-c C-k)"  "k" #'+my/cancel)
+
+;; Ctrl+Backspace deletes the word before point (default); Alt+Backspace now
+;; deletes the word after it.
+(map! "M-DEL"         #'kill-word
+      [M-backspace]   #'kill-word)
