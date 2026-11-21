@@ -330,3 +330,55 @@ If it's already that big, balance all windows instead."
    '("C-j" . +my/scroll-half-page-up)
    '("C-k" . +my/scroll-half-page-down)))
 (map! :leader :desc "Jump to references" "c r" #'+lookup/references)
+
+;; `o' in normal state opens a file in the window to the right, like `o' in
+;; dired. Meow's block selection moves from `o' to `O' (replacing `meow-to-block').
+(defun +my/find-file-right (file)
+  "Open FILE in the window to the right."
+  (interactive (list (read-file-name "Find file (right): ")))
+  (+my/select-window-right)
+  (find-file file))
+
+(after! meow
+  (meow-normal-define-key
+   '("o" . +my/find-file-right)
+   '("O" . meow-block)))
+
+;; In Magit, RET on a changed file or hunk opens it in the window to the right
+;; (keeping the status buffer visible) instead of replacing the Magit window.
+(defun +my/magit-diff-visit-file-right ()
+  "Like `magit-diff-visit-file', but display the file in the window to the right."
+  (interactive)
+  (magit-diff-visit-file--internal
+   (and magit-diff-visit-prefer-worktree
+        (memq (magit-diff--dwim) '(staged unstaged)))
+   (lambda (buf)
+     (+my/select-window-right)
+     (switch-to-buffer buf))))
+
+(map! :after magit :map magit-diff-section-map
+      [remap magit-visit-thing] #'+my/magit-diff-visit-file-right)
+
+;; `SPC a' / `SPC k' run whatever C-c C-c (accept/confirm) and C-c C-k
+;; (kill/cancel) do in the current buffer, e.g. finishing or aborting a commit
+;; message. `SPC k' was doom-meow's duplicate of the code menu, now on `SPC c'.
+(defun +my/run-key-here (keys)
+  "Run the command bound to KEYS in the current buffer."
+  (let ((cmd (key-binding (kbd keys))))
+    (if (commandp cmd)
+        (call-interactively cmd)
+      (user-error "%s does nothing here" keys))))
+
+(defun +my/confirm ()
+  "Confirm/finish, like C-c C-c."
+  (interactive)
+  (+my/run-key-here "C-c C-c"))
+
+(defun +my/cancel ()
+  "Cancel/abort, like C-c C-k."
+  (interactive)
+  (+my/run-key-here "C-c C-k"))
+
+(map! :leader
+      :desc "Confirm (C-c C-c)" "a" #'+my/confirm
+      :desc "Cancel (C-c C-k)"  "k" #'+my/cancel)
