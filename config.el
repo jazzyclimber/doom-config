@@ -127,7 +127,7 @@
 ;; them. Meow's keypad normally turns `SPC c' into C-c and `SPC g' into C-M-,
 ;; so free those keys first (C-M- moves to `SPC G').
 (after! meow
-  (setq meow-keypad-start-keys (assq-delete-all ?c (copy-alist meow-keypad-start-keys))
+  (setq meow-keypad-start-keys (assq-delete-all ?x (assq-delete-all ?c (copy-alist meow-keypad-start-keys)))
         meow-keypad-ctrl-meta-prefix ?G))
 
 ;; doom-meow moved code to `SPC k' and hung the localleader off C-c c. Put the
@@ -412,3 +412,362 @@ Web and mail links just open normally."
 ;; deletes the word after it.
 (map! "M-DEL"         #'kill-word
       [M-backspace]   #'kill-word)
+
+;; Per-repo notes: `SPC x' captures into ~/org/projects/<repo>.org under "Notes".
+(defvar +my/org-capture-project nil
+  "Project name chosen for the capture in progress.")
+
+(defun +my/org-project-file ()
+  "File for the project chosen by `+my/org-capture-project'."
+  (let ((dir (expand-file-name "projects/" org-directory)))
+    (make-directory dir t)
+    (expand-file-name (concat +my/org-capture-project ".org") dir)))
+
+(defun +my/org-project-notes-heading ()
+  "Move to the \"Notes\" heading of the project file, creating it if needed."
+  (goto-char (point-min))
+  (unless (re-search-forward "^\\* Notes\\b" nil t)
+    (when (= (buffer-size) 0)
+      (insert "#+title: " +my/org-capture-project "\n\n"))
+    (goto-char (point-max))
+    (unless (bolp) (insert "\n"))
+    (insert "* Notes\n")
+    (forward-line -1))
+  (beginning-of-line))
+
+(defun +my/org-capture-project ()
+  "Capture a note into the current project's Org file.
+Outside a project, ask which project file to use."
+  (interactive)
+  (setq +my/org-capture-project
+        (or (and (fboundp 'projectile-project-p) (projectile-project-p)
+                 (projectile-project-name))
+            (completing-read
+             "Project: "
+             (mapcar #'file-name-base
+                     (directory-files (expand-file-name "projects/" org-directory)
+                                      nil "\\.org\\'")))))
+  (org-capture nil "p"))
+
+(after! org-capture
+  (add-to-list 'org-capture-templates
+               '("p" "Project note" entry
+                 (file+function +my/org-project-file +my/org-project-notes-heading)
+                 "* %?\n  %U\n  %a\n")))
+
+;; Capture into any Org file under `org-directory', under a heading you pick.
+(defvar +my/org-capture-file nil "File chosen for the capture in progress.")
+(defvar +my/org-capture-line nil
+  "Line of the heading to file under, or nil to append at the top level.")
+
+(defun +my/org-capture-target-file () +my/org-capture-file)
+
+(defun +my/org-capture-target-heading ()
+  "Move point to the chosen heading, or to the end of the file."
+  (widen)
+  (if +my/org-capture-line
+      (progn (goto-char (point-min))
+             (forward-line (1- +my/org-capture-line)))
+    (goto-char (point-max))
+    (unless (or (bobp) (bolp)) (insert "\n"))))
+
+(defun +my/org-file-headings (file)
+  "Return an alist of (LABEL . LINE) for the headings in FILE."
+  (when (file-exists-p file)
+    (with-current-buffer (find-file-noselect file)
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char (point-min))
+          (let (res)
+            (while (re-search-forward "^\\(\\*+\\) \\(.*\\)$" nil t)
+              (push (cons (concat (make-string (* 2 (1- (length (match-string 1)))) ?\s)
+                                  (match-string 1) " " (match-string 2))
+                          (line-number-at-pos (match-beginning 0)))
+                    res))
+            (nreverse res)))))))
+
+(defun +my/org-capture-in-file ()
+  "Capture a note into an Org file you pick, under a heading you pick."
+  (interactive)
+  (let* ((dir (file-name-as-directory (expand-file-name org-directory)))
+         (rels (mapcar (lambda (f) (file-relative-name f dir))
+                       (directory-files-recursively dir "\\.org\\'")))
+         (rel (completing-read "Org file (new name to create): " rels))
+         (file (expand-file-name (if (string-suffix-p ".org" rel) rel (concat rel ".org")) dir))
+         (headings (+my/org-file-headings file))
+         (top "(top level, end of file)")
+         (choice (completing-read
+                  "File under: "
+                  (lambda (str pred action)
+                    (if (eq action 'metadata)
+                        '(metadata (display-sort-function . identity))
+                      (complete-with-action action (cons top (mapcar #'car headings)) str pred)))
+                  nil t)))
+    (make-directory (file-name-directory file) t)
+    (setq +my/org-capture-file file
+          +my/org-capture-line (cdr (assoc choice headings)))
+    (org-capture nil "f")))
+
+(after! org-capture
+  (add-to-list 'org-capture-templates
+               '("f" "Note in chosen file" entry
+                 (file+function +my/org-capture-target-file +my/org-capture-target-heading)
+                 "* %?\n  %U\n  %a\n")))
+
+(map! :leader
+      :desc "Project note"  "x" #'+my/org-capture-project
+      (:prefix-map ("X" . "capture")
+       :desc "Note in chosen file"  "f" #'+my/org-capture-in-file
+       :desc "Org capture menu"     "X" #'org-capture))
+
+;; Run/build menu on `SPC r': package.json scripts and arbitrary build commands
+;; run in an async shell buffer at the project (or package) root.
+(defvar +my/js-script-prefix "bend yarn"
+  "Command prefix used to run package.json scripts.")
+
+(defvar +my/run-history nil "History of commands run from `SPC r c'.")
+(defvar +my/run-last nil "Last run as (COMMAND DIRECTORY BUFFER-NAME).")
+
+(defun +my/run-in (command dir)
+  "Run COMMAND in DIR in an async shell buffer and remember it."
+  (let ((buf (format "*run: %s*" command))
+        (default-directory dir))
+    (setq +my/run-last (list command dir buf))
+    (async-shell-command command buf)))
+
+(defun +my/project-root ()
+  (or (and (fboundp 'projectile-project-root) (projectile-project-root))
+      default-directory))
+
+(defun +my/package-json-files ()
+  "Return package.json files from here up to the project root, nearest first."
+  (let* ((stop (and (fboundp 'projectile-project-root)
+                    (projectile-project-root)))
+         (stop (and stop (file-truename stop)))
+         (dir (file-truename default-directory))
+         (home (file-truename "~/"))
+         files)
+    (while dir
+      (let ((file (expand-file-name "package.json" dir)))
+        (when (file-exists-p file) (push file files)))
+      (setq dir (and (not (equal dir stop))
+                     (not (equal dir home))
+                     (let ((parent (file-name-directory (directory-file-name dir))))
+                       (and (not (equal parent dir)) parent)))))
+    (nreverse files)))
+
+(defun +my/package-json-read (file)
+  "Return (LABEL . SCRIPTS-ALIST) for package.json FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let* ((json (json-parse-buffer))
+           (scripts (gethash "scripts" json))
+           (rel (abbreviate-file-name (file-name-directory file)))
+           (label (format "%s  (%s)" (or (gethash "name" json) "unnamed") rel)))
+      (cons label
+            (and scripts
+                 (mapcar (lambda (k) (cons k (gethash k scripts)))
+                         (sort (hash-table-keys scripts) #'string<)))))))
+
+(defun +my/run-package-script (&optional ask-prefix)
+  "Pick a script from every package.json up to the project root and run it.
+Scripts are grouped by package.json, nearest first.  With a prefix
+argument, ask for the command prefix first."
+  (interactive "P")
+  (let ((files (or (+my/package-json-files) (user-error "No package.json found")))
+        (table (make-hash-table :test 'equal))
+        cands)
+    (dolist (file files)
+      (let ((read (+my/package-json-read file)))
+        (dolist (s (cdr read))
+          (let ((cand (propertize (format "%s  [%s]" (car s) (car read))
+                                  'my-label (car read) 'my-cmd (cdr s))))
+            (puthash cand (cons (car s) (file-name-directory file)) table)
+            (push cand cands)))))
+    (unless cands (user-error "No scripts in any package.json"))
+    (setq cands (nreverse cands))
+    (let* ((choice
+            (completing-read
+             "Script: "
+             (lambda (str pred action)
+               (if (eq action 'metadata)
+                   `(metadata
+                     (display-sort-function . identity)
+                     (cycle-sort-function . identity)
+                     (group-function
+                      . ,(lambda (c transform)
+                           (let ((label (get-text-property 0 'my-label c)))
+                             (if transform
+                                 (substring c 0 (- (length c) (length label) 4))
+                               label))))
+                     (annotation-function
+                      . ,(lambda (c)
+                           (let ((cmd (get-text-property 0 'my-cmd c)))
+                             (and cmd (concat "  " (truncate-string-to-width cmd 60 nil nil "…")))))))
+                 (complete-with-action action cands str pred)))
+             nil t))
+           (hit (gethash choice table)))
+      (when ask-prefix (+my/set-script-prefix))
+      (+my/run-in (concat +my/js-script-prefix " " (car hit)) (cdr hit)))))
+
+(defun +my/set-script-prefix ()
+  "Change the command prefix used for package.json scripts."
+  (interactive)
+  (setq +my/js-script-prefix
+        (read-string "Script prefix: " +my/js-script-prefix))
+  (message "Script prefix: %s" +my/js-script-prefix))
+
+(defun +my/run-build-command (&optional here)
+  "Run any build command in the project root, with history.
+With a prefix argument, run it in the current directory instead."
+  (interactive "P")
+  (let ((root (if here default-directory (+my/project-root))))
+    (+my/run-in (read-shell-command (format "Run in %s: " (abbreviate-file-name root))
+                                    (car +my/run-history) '+my/run-history)
+                root)))
+
+(defun +my/run-again ()
+  "Run the last command again."
+  (interactive)
+  (unless +my/run-last (user-error "Nothing has been run yet"))
+  (+my/run-in (nth 0 +my/run-last) (nth 1 +my/run-last)))
+
+(defun +my/run-last-buffer ()
+  "Show the buffer of the last run."
+  (interactive)
+  (let ((buf (and +my/run-last (get-buffer (nth 2 +my/run-last)))))
+    (if buf (pop-to-buffer buf) (user-error "No run buffer"))))
+
+(defun +my/run-kill ()
+  "Stop the last run's process."
+  (interactive)
+  (let* ((buf (and +my/run-last (get-buffer (nth 2 +my/run-last))))
+         (proc (and buf (get-buffer-process buf))))
+    (if (process-live-p proc)
+        (progn (interrupt-process proc) (message "Stopped: %s" (nth 0 +my/run-last)))
+      (message "Nothing running"))))
+
+(map! :leader
+      (:prefix-map ("r" . "run/build")
+       :desc "Package.json script"   "s" #'+my/run-package-script
+       :desc "Run build command"     "c" #'+my/run-build-command
+       :desc "Run last again"        "r" #'+my/run-again
+       :desc "Last run buffer"       "b" #'+my/run-last-buffer
+       :desc "Stop running process"  "k" #'+my/run-kill
+       :desc "Set script prefix"     "p" #'+my/set-script-prefix))
+
+;; Save and return to a cursor position without making a bookmark.
+;; `SPC j m' remembers the position, `SPC j j' jumps back to it.
+;; With C-u, either key asks for a register letter so you can keep several.
+(defun +my/pin-register (arg)
+  (if arg (read-char "Register: ") ?p))
+
+(defun +my/pin-set (arg)
+  "Remember the cursor position (in register p, or one you choose with C-u)."
+  (interactive "P")
+  (let ((reg (+my/pin-register arg)))
+    (point-to-register reg)
+    (message "Position saved in register %c" reg)))
+
+(defun +my/pin-jump (arg)
+  "Jump back to the remembered cursor position."
+  (interactive "P")
+  (let ((reg (+my/pin-register arg)))
+    (unless (get-register reg) (user-error "Nothing saved in register %c" reg))
+    (push-mark nil t)
+    (jump-to-register reg)))
+
+(map! :leader
+      (:prefix-map ("j" . "jump")
+       :desc "Save position"       "m" #'+my/pin-set
+       :desc "Jump back to saved"  "j" #'+my/pin-jump))
+
+;; JSX/TSX outline: `SPC j t' lists components and JSX tags as an indented
+;; tree (names only, no props); picking one jumps to it, with live preview.
+(defun +my/jsx-parser ()
+  "Return a tree-sitter parser that understands JSX for this buffer."
+  (or (cl-find-if (lambda (p) (memq (treesit-parser-language p) '(tsx javascript jsx)))
+                  (treesit-parser-list))
+      (cl-some (lambda (lang)
+                 (and (treesit-language-available-p lang)
+                      (treesit-parser-create lang)))
+               '(tsx javascript))
+      (user-error "No tree-sitter grammar for JSX/TSX is available")))
+
+(defun +my/jsx-outline-candidates ()
+  "Return outline entries as a list of (LABEL . POSITION) in buffer order."
+  (let* ((root (treesit-parser-root-node (+my/jsx-parser)))
+         (fn-types '("arrow_function" "function_expression" "function"))
+         res)
+    (cl-labels
+        ((text (n) (and n (treesit-node-text n t)))
+         (add (depth label node)
+           (push (cons (format "%s%s  L%d"
+                               (make-string (* 2 depth) ?\s) label
+                               (line-number-at-pos (treesit-node-start node)))
+                       (treesit-node-start node))
+                 res))
+         (component-p (node)
+           (let ((name (text (treesit-node-child-by-field-name node "name")))
+                 (val (treesit-node-child-by-field-name node "value")))
+             (and name val
+                  (or (member (treesit-node-type val) fn-types)
+                      (and (equal (treesit-node-type val) "call_expression")
+                           (let ((case-fold-search nil)) (string-match-p "\\`[A-Z]" name)))))))
+         (walk (node depth)
+           (let ((type (treesit-node-type node)) (d depth))
+             (cond
+              ((member type '("function_declaration" "class_declaration"
+                              "generator_function_declaration"))
+               (when-let* ((name (text (treesit-node-child-by-field-name node "name"))))
+                 (add depth (concat (if (equal type "class_declaration") "class " "ƒ ") name) node)
+                 (setq d (1+ depth))))
+              ((and (equal type "variable_declarator") (component-p node))
+               (add depth (concat "ƒ " (text (treesit-node-child-by-field-name node "name"))) node)
+               (setq d (1+ depth)))
+              ((equal type "jsx_self_closing_element")
+               (add depth (format "<%s>" (or (text (treesit-node-child-by-field-name node "name")) "")) node))
+              ((equal type "jsx_element")
+               (let* ((open (treesit-node-child-by-field-name node "open_tag"))
+                      (name (text (and open (treesit-node-child-by-field-name open "name")))))
+                 (add depth (format "<%s>" (or name "")) node)
+                 (setq d (1+ depth)))))
+             (dolist (c (treesit-node-children node t))
+               (walk c d)))))
+      (walk root 0))
+    (nreverse res)))
+
+(defun +my/jsx-outline ()
+  "Pick a component or JSX tag from an indented outline and jump to it."
+  (interactive)
+  (require 'consult)
+  (let* ((entries (or (+my/jsx-outline-candidates) (user-error "No components or JSX tags found")))
+         (cands (mapcar (lambda (e)
+                          (propertize (car e) 'consult--candidate
+                                      (copy-marker (cdr e))))
+                        entries)))
+    (consult--read cands
+                   :prompt "JSX outline: "
+                   :sort nil
+                   :require-match t
+                   :category 'jsx-outline
+                   :lookup #'consult--lookup-candidate
+                   :state (consult--jump-state))))
+
+(map! :leader :desc "JSX/TSX outline" "j t" #'+my/jsx-outline)
+
+;; Git permalink: `SPC g y' copies a commit-pinned GitHub link to the selection,
+;; or to the current line when nothing is selected.
+(defun +my/git-permalink ()
+  "Copy a permalink (commit hash, not branch) to the selection or current line."
+  (interactive)
+  (require 'git-link)
+  (let ((git-link-use-commit t)
+        (git-link-open-in-browser nil))
+    (apply #'git-link (git-link--remote)
+           (if (use-region-p)
+               (git-link--get-region)
+             (list (line-number-at-pos) nil)))))
+
+(map! :leader :desc "Copy git permalink" "g y" #'+my/git-permalink)
