@@ -25,9 +25,32 @@
 ;;      doom-variable-pitch-font (font-spec :family "Fira Sans" :size 13))
 (setq doom-font (font-spec :family "Menlo" :size 16))
 
+(setq-default line-spacing 0.3)
+
 ;; Open GUI frames at 150 columns x 50 lines
 (add-to-list 'default-frame-alist '(width . 150))
 (add-to-list 'default-frame-alist '(height . 50))
+
+(defun +my/center-frame (&optional frame)
+  "Shrink FRAME to fit the display work area if needed, then center it."
+  (when (display-graphic-p frame)
+    (let* ((frame (or frame (selected-frame)))
+           (wa (frame-monitor-workarea frame))
+           (wx (nth 0 wa)) (wy (nth 1 wa))
+           (ww (nth 2 wa)) (wh (nth 3 wa))
+           (cw (frame-char-width frame))
+           (ch (frame-char-height frame)))
+      (set-frame-size frame
+                      (min (frame-width frame) (max 40 (floor (* 0.95 ww) cw)))
+                      (min (frame-height frame) (max 10 (floor (* 0.90 wh) ch))))
+      (let ((fw (frame-outer-width frame))
+            (fh (frame-outer-height frame)))
+        (set-frame-position frame
+                            (+ wx (max 0 (/ (- ww fw) 2)))
+                            (+ wy (max 0 (/ (- wh fh) 2))))))))
+
+(add-hook 'window-setup-hook #'+my/center-frame)
+(add-hook 'after-make-frame-functions #'+my/center-frame)
 ;;
 ;; If you or Emacs can't find your font, use 'M-x describe-font' to look them
 ;; up, `M-x eval-region' to execute elisp code, and 'M-x doom/reload-font' to
@@ -423,20 +446,28 @@ Web and mail links just open normally."
     (make-directory dir t)
     (expand-file-name (concat +my/org-capture-project ".org") dir)))
 
-(defun +my/org-project-notes-heading ()
-  "Move to the \"Notes\" heading of the project file, creating it if needed."
+(defun +my/org-project-goto-heading (name)
+  "Move to the top-level heading NAME in the project file, creating it if needed."
   (goto-char (point-min))
-  (unless (re-search-forward "^\\* Notes\\b" nil t)
+  (unless (re-search-forward (format "^\\* %s\\b" (regexp-quote name)) nil t)
     (when (= (buffer-size) 0)
       (insert "#+title: " +my/org-capture-project "\n\n"))
     (goto-char (point-max))
     (unless (bolp) (insert "\n"))
-    (insert "* Notes\n")
+    (insert "* " name "\n")
     (forward-line -1))
   (beginning-of-line))
 
-(defun +my/org-capture-project ()
-  "Capture a note into the current project's Org file.
+(defun +my/org-project-notes-heading ()
+  "Move to the \"Notes\" heading of the project file."
+  (+my/org-project-goto-heading "Notes"))
+
+(defun +my/org-project-tasks-heading ()
+  "Move to the \"Tasks\" heading of the project file."
+  (+my/org-project-goto-heading "Tasks"))
+
+(defun +my/org-capture-project (&optional key)
+  "Capture into the current project's Org file; KEY picks the template.
 Outside a project, ask which project file to use."
   (interactive)
   (setq +my/org-capture-project
@@ -447,13 +478,29 @@ Outside a project, ask which project file to use."
              (mapcar #'file-name-base
                      (directory-files (expand-file-name "projects/" org-directory)
                                       nil "\\.org\\'")))))
-  (org-capture nil "p"))
+  (org-capture nil (or key "p")))
+
+(defun +my/org-capture-project-todo ()
+  "Capture a TODO into the current project's Org file, under \"Tasks\"."
+  (interactive)
+  (+my/org-capture-project "P"))
 
 (after! org-capture
   (add-to-list 'org-capture-templates
                '("p" "Project note" entry
                  (file+function +my/org-project-file +my/org-project-notes-heading)
                  "* %?\n  %U\n  %a\n")))
+
+(after! org-capture
+  (add-to-list 'org-capture-templates
+               '("P" "Project TODO" entry
+                 (file+function +my/org-project-file +my/org-project-tasks-heading)
+                 "* TODO %?\n  %U\n  %a\n")))
+
+(defun +my/org-mark-done ()
+  "Mark the heading at point as DONE, whatever state it is in."
+  (interactive)
+  (org-todo 'done))
 
 ;; Capture into any Org file under `org-directory', under a heading you pick.
 (defvar +my/org-capture-file nil "File chosen for the capture in progress.")
@@ -487,8 +534,9 @@ Outside a project, ask which project file to use."
                     res))
             (nreverse res)))))))
 
-(defun +my/org-capture-in-file ()
-  "Capture a note into an Org file you pick, under a heading you pick."
+(defun +my/org-capture-in-file (&optional key)
+  "Capture into an Org file you pick, under a heading you pick.
+KEY is the capture template to use; the default is a plain note."
   (interactive)
   (let* ((dir (file-name-as-directory (expand-file-name org-directory)))
          (rels (mapcar (lambda (f) (file-relative-name f dir))
@@ -507,7 +555,12 @@ Outside a project, ask which project file to use."
     (make-directory (file-name-directory file) t)
     (setq +my/org-capture-file file
           +my/org-capture-line (cdr (assoc choice headings)))
-    (org-capture nil "f")))
+    (org-capture nil (or key "f"))))
+
+(defun +my/org-capture-todo-in-file ()
+  "Capture a TODO into an Org file you pick, under a heading you pick."
+  (interactive)
+  (+my/org-capture-in-file "F"))
 
 (after! org-capture
   (add-to-list 'org-capture-templates
@@ -515,11 +568,24 @@ Outside a project, ask which project file to use."
                  (file+function +my/org-capture-target-file +my/org-capture-target-heading)
                  "* %?\n  %U\n  %a\n")))
 
+(after! org-capture
+  (add-to-list 'org-capture-templates
+               '("F" "TODO in chosen file" entry
+                 (file+function +my/org-capture-target-file +my/org-capture-target-heading)
+                 "* TODO %?\n  %U\n  %a\n")))
+
 (map! :leader
-      :desc "Project note"  "x" #'+my/org-capture-project
-      (:prefix-map ("X" . "capture")
-       :desc "Note in chosen file"  "f" #'+my/org-capture-in-file
-       :desc "Org capture menu"     "X" #'org-capture))
+      :desc "Project note"  "X" #'+my/org-capture-project
+      (:prefix-map ("x" . "capture")
+       :desc "Mark DONE"            "d" #'+my/org-mark-done
+       :desc "Change TODO state"    "s" #'org-todo
+       :desc "Archive subtree"      "a" #'org-archive-subtree
+       :desc "Refile heading"       "r" #'org-refile
+       :desc "Refile (copy)"        "R" #'org-refile-copy
+       :desc "Project TODO"         "p" #'+my/org-capture-project-todo
+       :desc "Note in chosen file"  "n" #'+my/org-capture-in-file
+       :desc "TODO in chosen file"  "t" #'+my/org-capture-todo-in-file
+       :desc "Org capture menu"     "x" #'org-capture))
 
 ;; Run/build menu on `SPC r': package.json scripts and arbitrary build commands
 ;; run in an async shell buffer at the project (or package) root.
@@ -703,9 +769,10 @@ With a prefix argument, run it in the current directory instead."
     (cl-labels
         ((text (n) (and n (treesit-node-text n t)))
          (add (depth label node)
-           (push (cons (format "%s%s  L%d"
-                               (make-string (* 2 depth) ?\s) label
-                               (line-number-at-pos (treesit-node-start node)))
+           (push (cons (propertize (format "%s%s  L%d"
+                                           (make-string (* 2 depth) ?\s) label
+                                           (line-number-at-pos (treesit-node-start node)))
+                                   'my-end (treesit-node-end node))
                        (treesit-node-start node))
                  res))
          (component-p (node)
@@ -738,22 +805,110 @@ With a prefix argument, run it in the current directory instead."
       (walk root 0))
     (nreverse res)))
 
+(defun +my/css--scan ()
+  "Scan the current buffer for CSS rules; see `+my/css-outline-candidates'."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((stack nil) (start (point-min)) res)
+        (while (re-search-forward "[{};]" nil t)
+          (let ((pos (match-beginning 0)) (ch (char-before)))
+            (unless (nth 8 (save-excursion (syntax-ppss pos)))
+              (cond
+               ((eq ch ?{)
+                (if (and (> pos (point-min)) (eq (char-before pos) ?#))
+                    (push 'interp stack)
+                  (let* ((from (save-excursion (goto-char start)
+                                               (forward-comment (buffer-size))
+                                               (point)))
+                         (raw (and (< from pos)
+                                   (buffer-substring-no-properties from pos)))
+                         (label (and raw
+                                     (string-trim
+                                      (replace-regexp-in-string
+                                       "[ \t\n\r]+" " "
+                                       (replace-regexp-in-string "/\\*[^z-a]*?\\*/" "" raw))))))
+                    (if (and label (not (string-empty-p label)))
+                        (let ((entry (list (format "%s%s  L%d"
+                                                   (make-string (* 2 (cl-count-if #'consp stack)) ?\s)
+                                                   (truncate-string-to-width label 80 nil nil "…")
+                                                   (line-number-at-pos from))
+                                           from (point-max))))
+                          (push entry res)
+                          (push entry stack))
+                      (push 'blk stack))
+                    (setq start (point)))))
+               ((eq ch ?})
+                (let ((top (pop stack)))
+                  (when (consp top) (setcar (cddr top) (point)))
+                  (unless (eq top 'interp) (setq start (point)))))
+               (t (setq start (point)))))))
+        (mapcar (lambda (e) (cons (propertize (car e) 'my-end (nth 2 e)) (nth 1 e)))
+                (nreverse res))))))
+
+(defconst +my/css-file-regexp "\\.\\(css\\|scss\\|less\\|pcss\\|postcss\\)\\'")
+
+(defun +my/css-buffer-p ()
+  "Non-nil if the current buffer is a CSS-like file, whatever mode it is in."
+  (or (derived-mode-p 'css-mode 'css-ts-mode 'scss-mode 'less-css-mode)
+      (and buffer-file-name (string-match-p +my/css-file-regexp buffer-file-name))))
+
+(defun +my/css-outline-candidates ()
+  "Return (LABEL . POSITION) for each CSS/SCSS/Less rule, indented by nesting.
+Each comma-separated selector group is one entry.  Buffers that are not in a
+CSS mode are scanned as SCSS in a temporary copy, so comments are skipped."
+  (if (derived-mode-p 'css-mode 'css-ts-mode 'scss-mode 'less-css-mode)
+      (+my/css--scan)
+    (let ((text (save-restriction (widen) (buffer-substring-no-properties (point-min) (point-max)))))
+      (with-temp-buffer
+        (require 'css-mode)
+        (insert text)
+        (scss-mode)
+        (+my/css--scan)))))
+
+(defun +my/outline-entry-at (entries pt)
+  "Return the entry in ENTRIES for the innermost item containing PT.
+Falls back to the closest item before PT, then the first item."
+  (let ((start (lambda (e) (save-excursion (goto-char (cdr e)) (line-beginning-position)))))
+    (or (car (last (cl-remove-if-not
+                    (lambda (e) (and (<= (funcall start e) pt)
+                                     (<= pt (get-text-property 0 'my-end (car e)))))
+                    entries)))
+        (car (last (cl-remove-if-not (lambda (e) (<= (funcall start e) pt)) entries)))
+        (car entries))))
+
 (defun +my/jsx-outline ()
   "Pick a component or JSX tag from an indented outline and jump to it."
   (interactive)
   (require 'consult)
-  (let* ((entries (or (+my/jsx-outline-candidates) (user-error "No components or JSX tags found")))
+  (let* ((css (+my/css-buffer-p))
+         (entries (or (if css (+my/css-outline-candidates) (+my/jsx-outline-candidates))
+                      (user-error (if css "No CSS rules found" "No components or JSX tags found"))))
+         (idx (cl-position (+my/outline-entry-at entries (point)) entries))
          (cands (mapcar (lambda (e)
                           (propertize (car e) 'consult--candidate
                                       (copy-marker (cdr e))))
                         entries)))
-    (consult--read cands
-                   :prompt "JSX outline: "
-                   :sort nil
-                   :require-match t
-                   :category 'jsx-outline
-                   :lookup #'consult--lookup-candidate
-                   :state (consult--jump-state))))
+    ;; Keep the list in file order and only move the highlight to the entry at
+    ;; point (a `:default' would move that entry to the top of the list).
+    (let* ((done nil)
+           (select (lambda (&rest _)
+                     (when (and idx (not done)
+                                (bound-and-true-p vertico--total)
+                                (> vertico--total 0))
+                       (setq done t)
+                       (vertico--goto idx)))))
+      (advice-add 'vertico--update :after select)
+      (unwind-protect
+          (consult--read cands
+                         :prompt "Outline: "
+                         :sort nil
+                         :require-match t
+                         :category 'jsx-outline
+                         :lookup #'consult--lookup-candidate
+                         :state (consult--jump-state))
+        (advice-remove 'vertico--update select)))))
 
 (map! :leader :desc "JSX/TSX outline" "j t" #'+my/jsx-outline)
 
@@ -771,3 +926,35 @@ With a prefix argument, run it in the current directory instead."
              (list (line-number-at-pos) nil)))))
 
 (map! :leader :desc "Copy git permalink" "g y" #'+my/git-permalink)
+
+;; Use tree-sitter CSS highlighting for .css files when the grammar is installed.
+(after! treesit
+  (add-to-list 'treesit-extra-load-path (concat doom-cache-dir "tree-sitter/")))
+(add-to-list 'major-mode-remap-alist '(css-mode . css-ts-mode))
+
+;; Org: turn the selected text into a link to the URL on the clipboard
+;; (`SPC l y', or `C-c y' from any state incl. insert). With no selection,
+;; prompt for the link text.
+(defun +my/org-link-from-clipboard ()
+  "Wrap the active region in an Org link whose target is the clipboard URL."
+  (interactive)
+  (let ((url (string-trim (or (current-kill 0 t) ""))))
+    (unless (string-match-p "\\`[a-z][a-z0-9+.-]*:" url)
+      (user-error "Clipboard doesn't look like a URL: %s" url))
+    (if (use-region-p)
+        (let ((label (buffer-substring-no-properties (region-beginning) (region-end))))
+          (delete-region (region-beginning) (region-end))
+          (insert (org-link-make-string url label)))
+      (let ((label (read-string "Link text (empty for bare URL): ")))
+        (insert (org-link-make-string url (unless (string-empty-p label) label)))))))
+
+(map! :after org :map org-mode-map :localleader
+      :desc "Link from clipboard" "y" #'+my/org-link-from-clipboard)
+(map! :after org :map org-mode-map "C-c y" #'+my/org-link-from-clipboard)
+
+;; Side-by-side diffs: old on the left, new on the right, control panel in the
+;; same frame instead of a separate one.
+(after! ediff
+  (setq ediff-split-window-function #'split-window-horizontally
+        ediff-window-setup-function #'ediff-setup-windows-plain
+        ediff-diff-options "-w"))
