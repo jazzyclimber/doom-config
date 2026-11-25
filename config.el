@@ -958,3 +958,21 @@ Falls back to the closest item before PT, then the first item."
   (setq ediff-split-window-function #'split-window-horizontally
         ediff-window-setup-function #'ediff-setup-windows-plain
         ediff-diff-options "-w"))
+
+;; Claude Code: highlight code, switch to the Claude window and ask -- it already
+;; sees the selection and current file. Proposed edits open as ediff.
+(use-package! claude-code-ide
+  :commands (claude-code-ide claude-code-ide-menu)
+  :init
+  (map! :leader
+        (:prefix-map ("k" . "claude")
+         :desc "Menu"            "k" #'claude-code-ide-menu
+         :desc "Start/switch"    "s" #'claude-code-ide
+         :desc "Send prompt"     "p" #'claude-code-ide-send-prompt
+         :desc "Toggle window"   "t" #'claude-code-ide-toggle
+         :desc "Stop"            "q" #'claude-code-ide-stop))
+  :config
+  ;; Absolute path: Emacs.app launched from the Dock may not have Homebrew on PATH.
+  (setq claude-code-ide-cli-path "/opt/homebrew/bin/claude"
+        claude-code-ide-terminal-backend 'ghostel)
+  (claude-code-ide-emacs-tools-setup))

@@ -51,3 +51,8 @@
 ;; (unpin! pinned-package another-pinned-package)
 ;; ...Or *all* packages (NOT RECOMMENDED; will likely break things)
 ;; (unpin! t)
+
+;; Claude Code inside Emacs, wired into its IDE integration (sees the current
+;; selection/file, shows edits as ediff).
+(package! claude-code-ide
+  :recipe (:host github :repo "manzaltu/claude-code-ide.el"))
